@@ -192,6 +192,7 @@ git config branch.<main>.merge refs/heads/<main>
 
 # 3. Keep `git push` -> origin (the triple-mirror pushurls)
 git config remote.pushDefault origin
+git config push.default current   # per-repo: no-arg `git push` always hits origin (the triple mirror)
 ```
 
 Now after a PR merges: `git pull` pulls it into local directly (FF, or a merge commit if you
@@ -293,11 +294,13 @@ until `git push` rejects. The `ngit-enable-repo.sh` script now avoids this by sp
 directions explicitly after the pushurl rebuild:
 - `git remote add github <github-url>` (FETCH-only source of truth; PRs merge here)
 - `git config branch.<main>.remote github`  → `git pull` consults GitHub
-- `git config remote.pushDefault origin`     → `git push` hits the triple mirror (never `github`)
+- `git config remote.pushDefault origin`     → `git push` targets the triple mirror (never `github`)
+- `git config push.default current`          → no-arg `git push` hits `origin` even if your global
+  `push.default` is `upstream` (which would otherwise refuse, since `branch.<main>.remote=github`)
 - `git config remote.github.fetch '+refs/heads/<main>:refs/remotes/github/<main>'` (scoped, avoids registering every upstream branch)
 
 With this, `git pull` and `git push` point at different remotes and ngit's `origin` rewrite can't
-reintroduce the trap. Apply the same four lines to any existing triple-mirror repo that still has
+reintroduce the trap. Apply the same five lines to any existing triple-mirror repo that still has
 `origin.fetch = nostr://` (i.e. `git pull` is blind to GitHub).
 
 ### Clone a Nostr Repo
