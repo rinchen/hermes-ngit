@@ -374,37 +374,50 @@ GitHub + Radicle + Nostr via `origin` pushurls. `git push` updates all three.
 
 ## Recovery: State-event "purgatory" accumulation (NIP-34 30617)
 
-**Symptom.** After you `git branch -D` old merged PR branches and later `git push`,
-the grasp server rejects the push with a `purgatory` error listing branches that no
-longer exist locally (seen on `cowx`).
+**Symptom.** After `git branch -D` old merged PR branches (or fixing remotes), `git push`
+(refs/heads/main doesn't exist and will be added as a new branch) → the grasp server
+rejects the push with `ERR authorisation failed: N state events in purgatory …` listing
+branches that no longer exist locally (seen on `cowx` and `persecutio`).
 
 **Root cause.** Each `ngit init` publishes a NIP-34 kind 30617 repository *state*
-event. Grasp servers (relay.ngit.dev, gitnostr.com) do **not** honor NIP-33
+event. Grasp servers (`relay.ngit.dev`, `gitnostr.com`) do **not** honor NIP-33
 replaceable semantics — old state events accumulate in "purgatory" instead of being
 replaced. The server checks every push against the **union of all purgatory events**,
 so every branch ever declared must still exist locally at its exact declared commit,
-even after you deleted it post-merge.
+even after you deleted it post-merge. Repeated `ngit init` runs *add* events without
+replacing them — purgatory can grow between attempts; don't re-run it once purgatory
+starts.
 
-**Probe first** — this tells you whether the server checks the latest state only or the
-union (the fix differs):
+**Probe first** — test with a non-main branch to confirm the server checks the union.
+`git push` to `origin` here will touch GitHub too — push to the `nostr://` URL directly
+so GitHub is not affected by a rejected probe.
 ```bash
 git branch enrich <declared-commit>
 git branch -f main <another-declared-commit>
 git push --force nostr://<npub>/relay.ngit.dev/<repo> main enrich
 ```
 - **Accepted** → server checks latest state only → just re-run `ngit init --clean -f -d`.
-- **Rejected** (lists other branches) → server checks the union → do the full reconcile.
+- **Rejected** (lists other branches) → server checks union → full reconcile below.
 
-**Full reconcile** (when the union is checked):
+**Full reconcile** (when the union is checked). IMPORTANT: this is invasive — force-pushes
+rewrite remote refs. Push to the **`nostr://` URL directly**; never `origin`. The push
+step in Phase 3 can succeed even while `gitnostr.com` still complains `No state events in
+purgatory` — that's a propagation lag, not a hard block. Treat `relay.ngit.dev` as primary.
 ```bash
 # Phase 1 — recreate every declared branch at its exact commit
 git branch <name1> <sha1>
 git branch <name2> <sha2>
-# … all N declared branches, including:
-git branch -f main <declared-main-sha>
+# … all N declared branches, including declared-missing ones like gh-pages if listed:
+git branch <name-with-slash> <sha>
+git branch -f main <declared-main-sha>       # use a temp ref or `git push` SHA→ref
+                                              # if main is checked out in the worktree
 
-# Phase 2 — satisfy the union so the push is accepted
-git push --force --all origin
+# Phase 1b — know your worktree: if `main` is checked out and you can't -f it,
+#               use `git push <nostr-url> <temp-branch>:refs/heads/main --force`
+#               or create a separate worktree before force-moving main.
+
+# Phase 2 — satisfy the union on the nostr URL only
+git push --force --all nostr://<npub>/relay.ngit.dev/<repo>
 
 # Phase 3 — publish a single combined state event
 ngit init --clean -f -d        # both relays should report "already in sync"
@@ -412,23 +425,38 @@ ngit init --clean -f -d        # both relays should report "already in sync"
 # Phase 4 — drop the stale branches, push the desired state
 git branch -f main <current-head-sha>
 git branch -D <stale-1> <stale-2> …
-git push --force --prune origin
+git push --force --prune nostr://<npub>/relay.ngit.dev/<repo>
 ngit init --clean -f -d
 ```
 
-**Caveats (observed on `cowx`, 2026-07-27):**
+**Hard rule from experience (cowx):** never let Phase 4's `--prune` target `origin` when
+`origin` also carries a GitHub or Radicle pushurl — that will delete real branches from
+those remotes too. Always push the purge step to the **`nostr://` URL directly**. If you
+need to prune `main` against the current state but preserve GitHub/Radicle, specify the
+nostr remote explicitly.
+
+**Caveats (observed on `cowx`, 2026-07-27 and `persecutio`):**
 - All declared commits must still exist in the local object store (they will, if
   they're ancestors of current `main`). If any are missing, the union can never be
   satisfied — then publish Nostr kind 5 deletion events (`nak event -k 5 -t e <id>
   --sec <nsec> -l relay.ngit.dev`) against the stale state-event IDs, or ask the grasp
   operator to clear purgatory.
+- Name/syntax gotcha: `git branch` accepts `<name> <sha>` but the `name <sha>` form
+  *inside* `< >` in a patch can be misread — here it's two separate arguments.
+  Equivalently you can use `git update-ref refs/heads/<name> <sha>` (not for checked-out
+  branches) or `git branch -f <name> <sha>`.
 - `gitnostr.com` is flaky: a direct push may fail with "No state events in purgatory"
   until `ngit init` has published a state event there. Treat **relay.ngit.dev as the
-  primary grasp server**; state events sync between grasp servers automatically.
+  primary grasp server**; state events sync between grasp servers automatically. If it
+  complains later during push-after-purge, re-run `ngit init --clean -f -d` and push
+  again.
 - A Radicle pushurl key-registration error means the `rad` node isn't running —
   `rad node start` then retry. (Unrelated to purgatory.)
 - If GitHub `main` is ahead after the fix (CI bots), recover with
   `git fetch git@github.com:rinchen/<repo>.git main && git rebase FETCH_HEAD && git push origin main`.
+- `gh-pages` is often listed in purgatory even if deleted locally; include it in Phase 1
+  if listed (the commit still exists in local object store). Do **not** prune it from
+  GitHub in Phase 4 — prune only to the nostr URL.
 
 ## Rationale
 
