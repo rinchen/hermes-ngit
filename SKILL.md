@@ -142,6 +142,115 @@ git push   # now updates GitHub + Nostr (+ Radicle) natively
 whole `git push` (including GitHub) can abort. If that bites you, drop the `nostr://`
 pushurl and run `ngit sync` as a separate step instead.
 
+PITFALL — triple-push mirrors can silently DIVERGE and `git pull` will NOT warn you.
+When `origin` has only a `nostr://` FETCH url (set by `ngit init`) but three PUSH urls
+(GitHub + Radicle + Nostr), `git pull` fetches from Nostr only. If GitHub gains a commit
+(e.g. a merged PR) your local `main` lacks, `git pull` still reports "Already up to date"
+because Nostr already had your tip. The divergence only surfaces as a non-fast-forward on
+`git push` to GitHub — while the Nostr/Radicle pushurls print "Everything up-to-date" (they
+already had your commit), making it look like only GitHub is the problem.
+Diagnosis BEFORE any reset: fetch each remote into a throwaway ref and check ancestry —
+`git fetch -q git@github.com:rinchen/<repo>.git +refs/heads/main:refs/remotes/ghprobe/main`,
+then `git merge-base --is-ancestor main ghprobe/main` (is local an ancestor of GitHub?) and
+the reverse. If NEITHER is an ancestor, the histories diverged (parallel duplicate commits).
+Confirm the content is actually identical before assuming a reset is safe:
+`git diff <local> <remote> --stat` and compare trees with `git rev-parse <c>^{tree}`.
+Resolution: prefer `git merge --no-ff` of the GitHub tip into local. The merge commit descends
+from BOTH sides, so a plain `git push` fast-forwards all three mirrors with no force. A
+`git reset --hard` to GitHub LOOKS simpler but will NON-fast-forward Nostr/Radicle (they sit at
+the local tip, which is not an ancestor of GitHub) — it trades one rejected pushurl for two.
+Only force-push if you intend to rewrite GitHub history.
+
+## Links format (radicle-links hub convention)
+When adding a repo to `~/repos/radicle-links/README.md` (the hub):
+- GitHub cell: `[GitHub](https://github.com/rinchen/<repo>)`
+- **Radicle cell uses the SHORT `[rad]` text** linking to `app.radicle.xyz/.../rad:<rid>` — NOT the full `rad:z…` ID as the display text.
+- Nostr cell: `[ngit](https://gitworkshop.dev/npub…/relay.ngit.dev/<repo>)`
+- All three columns per repo.
+
+PITFALL — recurring correction (broken 3× across sessions, including this one): do NOT write
+`[rad:z3Y6…]` as the link text. The visible label must be literally `rad`; the full RID stays
+inside the URL: `[rad](https://app.radicle.xyz/nodes/rosa.radicle.network/rad:z3Y6…)`. Apply
+this to EVERY row you add or move in the hub README — if a pre-existing row violates it (e.g.
+the Hermes Radicle Skill row did), fix that too, not just the new one. Verify with
+`grep -cE '\[rad:z' README.md` → expect 0.
+
+## Recommended multi-mirror workflow (kill the blind `git pull`)
+
+The trap above happens because `ngit init` sets `origin` to FETCH from Nostr but PUSH to
+GitHub+Radicle+Nostr. PRs merge on **GitHub**, which `git pull` never consults — so divergence
+is invisible until `git push` rejects. Fix it by splitting the two directions with plain git
+config (no hook, no source edits):
+
+```bash
+# 1. Add GitHub as a FETCH-ONLY remote (PRs merge here)
+git remote add github git@github.com:rinchen/<repo>.git
+
+# 2. Make `git pull` sync from GitHub (where PRs land)
+git config branch.<main>.remote github
+git config branch.<main>.merge refs/heads/<main>
+
+# 3. Keep `git push` -> origin (the triple-mirror pushurls)
+git config remote.pushDefault origin
+```
+
+Now after a PR merges: `git pull` pulls it into local directly (FF, or a merge commit if you
+also have local commits). No silent "Already up to date", no surprise non-fast-forward.
+`git push` still propagates to GitHub+Radicle+Nostr via `origin` pushurls.
+
+Mechanics: `branch.<name>.remote` controls the `git pull` source; `remote.pushDefault` controls
+the `git push` target — two independent knobs. `git pull --dry-run` should show `From
+github.com:rinchen/<repo>`; `git push --dry-run` should target `origin`.
+
+Optional: scope GitHub's fetch to the main branch only (otherwise the first `git pull` registers
+all upstream branches as `github/*` tracking refs — harmless but noisy):
+```bash
+git config remote.github.fetch '+refs/heads/<main>:refs/remotes/github/<main>'
+```
+Run `git fetch --all` occasionally to refresh the Nostr/Radicle tracking refs; not required for
+the pull/push fix.
+
+### The full lifecycle (proven, no mirror divergence)
+
+With the config above, every enabled repo follows this loop and stays converged:
+
+```bash
+# 1. Feature branch (local)
+git checkout -b feat/x
+
+# 2. Open the PR: push the BRANCH to GitHub ONLY.
+#    Do NOT `git push` (no args) here — that would push to the triple mirror via origin.
+git push -u github feat/x        # <- github remote, branch only, never origin
+
+# 3. Someone merges the PR on GitHub (web UI / gh). No action needed locally yet.
+
+# 4. Bring it home: pull the merge from GitHub into local main.
+git checkout <main>
+git pull                         # branch.<main>.remote=github -> fetches the merged PR
+
+# 5. Propagate to Radicle + Nostr (and GitHub again, as one of origin's pushurls).
+git push                         # remote.pushDefault=origin -> triple mirror
+
+# 6. Cleanup
+git push -d github feat/x        # delete the remote PR branch
+git branch -d feat/x             # delete the local branch
+git pull                         # stays clean (github/main unchanged)
+```
+
+**Why it can't reproduce the old bug:** the PR branch is pushed to the `github` *remote* (not
+`origin`), so it never reaches Radicle/Nostr until merged. The merge lands on GitHub; `git pull`
+(now GitHub-aware) fetches it; `git push` carries that same commit to `origin`'s three pushurls
+(GitHub+Radicle+Nostr) as a clean fast-forward. Local main is always an ancestor of all three.
+
+**Rules that keep it safe on every repo:**
+- Open PRs: `git push -u github <branch>` (never `git push` to origin, never the branch name on
+  `git push` with no remote).
+- Sync main: `git pull` (= GitHub). Never assume "Already up to date" means GitHub is caught up
+  — verify with `git fetch github` if you suspect a stale Nostr `origin` confused you.
+- Publish: `git push` (= origin triple mirror). A non-fast-forward here means a real divergence
+  (someone pushed elsewhere); diagnose with `git fetch github main` + merge-base check, don't force.
+- The `github` remote is fetch-only by convention: never add it as an `origin` pushurl.
+
 ## Core Commands
 
 ### Detect a Nostr Repo
@@ -177,6 +286,19 @@ git remote set-url --add --push origin "$(git remote get-url origin)"
 Now `git push` updates GitHub, Radicle (if present), **and** Nostr. All three stay in sync
 natively. (This is exactly what `~/repos/ngit-enable-repo/ngit-enable-repo.sh` automates,
 and that script already captures the GitHub-pushurl-before-ngit-init ordering.)
+
+**Hardened enable (prevents the blind-`git-pull` trap):** `ngit init` leaves `origin.fetch`
+pointing at Nostr, so `git pull` never sees GitHub-merged PRs — the divergence stays invisible
+until `git push` rejects. The `ngit-enable-repo.sh` script now avoids this by splitting the two
+directions explicitly after the pushurl rebuild:
+- `git remote add github <github-url>` (FETCH-only source of truth; PRs merge here)
+- `git config branch.<main>.remote github`  → `git pull` consults GitHub
+- `git config remote.pushDefault origin`     → `git push` hits the triple mirror (never `github`)
+- `git config remote.github.fetch '+refs/heads/<main>:refs/remotes/github/<main>'` (scoped, avoids registering every upstream branch)
+
+With this, `git pull` and `git push` point at different remotes and ngit's `origin` rewrite can't
+reintroduce the trap. Apply the same four lines to any existing triple-mirror repo that still has
+`origin.fetch = nostr://` (i.e. `git pull` is blind to GitHub).
 
 ### Clone a Nostr Repo
 
